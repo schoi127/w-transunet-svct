@@ -1,0 +1,20 @@
+# Core scientific stack
+numpy>=1.23
+scipy>=1.9
+matplotlib>=3.6
+tqdm>=4.64
+
+# Deep learning
+torch>=2.0
+torchvision>=0.15
+
+# Config utilities (used by TransUNet/VisionTransformer configs)
+ml-collections>=0.1.1
+
+# CT / inverse problems toolchain (LoDoPaB-CT via DIVal/ODL)
+odl>=0.7.0
+dival>=0.5.0
+
+# Optional (recommended for fast ray transforms; required if using --ray_impl astra_cuda)
+# astra-toolbox>=2.1
+
