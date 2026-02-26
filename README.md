@@ -27,7 +27,7 @@ w-transunet-svct/
 ├── requirements.txt
 ├── LICENSE
 │
-├── src/ㅊ
+├── src/
 │   ├── vit_seg_configs.py
 │   ├── vit_seg_modeling.py
 │   │
