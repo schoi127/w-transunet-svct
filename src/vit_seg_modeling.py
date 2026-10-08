@@ -16,8 +16,20 @@ import numpy as np
 from torch.nn import CrossEntropyLoss, Dropout, Softmax, Linear, Conv2d, LayerNorm
 from torch.nn.modules.utils import _pair
 from scipy import ndimage
-from . import vit_seg_configs as configs
-from .vit_seg_modeling_resnet_skip import ResNetV2
+
+# --- import shim (import mechanics only; no model code is affected) ---------
+# The relative form works when `src/` is used as a package; the absolute form
+# works when a script inside `src/` is run directly (`python src/train_*.py`),
+# which is how the README invokes everything. The original release shipped only
+# the relative form, so `import vit_seg_modeling` raised
+# "attempted relative import with no known parent package".
+try:
+    from . import vit_seg_configs as configs
+    from .vit_seg_modeling_resnet_skip import ResNetV2
+except ImportError:  # run as a top-level module rather than a package member
+    import vit_seg_configs as configs
+    from vit_seg_modeling_resnet_skip import ResNetV2
+# ---------------------------------------------------------------------------
 
 
 logger = logging.getLogger(__name__)

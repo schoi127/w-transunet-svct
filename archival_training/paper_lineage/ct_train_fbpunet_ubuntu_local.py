@@ -1,18 +1,6 @@
+# Archival source; complete checkpoint-generating run provenance is unavailable.
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-LoDoPaB-CT FBP → U-Net 학습 스크립트 (TransUNet 버전과 동일한 파이프라인)
-- FBP 이미지를 캐시(npz)로 저장/로드
-- FBP & GT를 전부 stack해서 메모리에 적재 (중앙 크롭 후 U-Net 회귀 학습)
-- AdamW + OneCycleLR, 검증 지표는 PSNR, 각 angle 루프
-author : Sunghoon Choi (ETRI)
-date   : 2025-07-15
---------------------------------------------------------------------
-필요 폴더 구조
-├── ./cache/⟨angle⟩angle/cache_lodopab_train_fbp.npy
-├── ./cache/⟨angle⟩angle/cache_lodopab_validation_fbp.npy
-└── (데이터셋 경로는 dival.config 로 지정)
-"""
 
 from pathlib import Path
 import os, sys, math, random, argparse
@@ -138,7 +126,7 @@ for angle in args.angles:
 
     reconstructor.init_model()
 
-    # ---------- 핵심 수정 A: DataParallel 강제 해제 & 단일 GPU 고정 ----------
+    # ---------- DataParallel 강제 해제 & 단일 GPU 고정 ----------
     # DIVal 내부에서 DataParallel을 감싸는 경우가 있어 OOM의 원인(작은 GPU에도 replica 생성)
     if isinstance(reconstructor.model, torch.nn.DataParallel):
         print('[INFO] Detected DataParallel → unwrap to single GPU.')
@@ -163,7 +151,7 @@ for angle in args.angles:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             reconstructor.optimizer.zero_grad(set_to_none=True)
 
-            # ---------- 핵심 수정 B: AMP ----------
+            # ---------- AMP ----------
             with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
                 out = reconstructor.model(x)
                 loss = criterion(out, y)
@@ -208,7 +196,7 @@ for angle in args.angles:
                    Path(LOG_DIR) / f'epoch_{epoch + 1:03d}.pth')
         if val_psnr > best_psnr:
             best_psnr = val_psnr
-            torch.save(reconstructor.model.state_dict(), Path(LOG_DIR) / 'best_model.pth')
+            torch.save(reconstructor.model.state_dict(), Path(LOG_DIR) / 'epoch_150.pth')
             print(f'    [+] New best model saved ({best_psnr:.2f} dB)')
 
         # ---- 10 epoch마다 시각화 (옵션) ----

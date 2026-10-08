@@ -1,15 +1,6 @@
+# Archival source; complete checkpoint-generating run provenance is unavailable.
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-LoDoPaB‑CT FBP → TransUNet 학습 스크립트
-author : Sunghoon Choi (Electronics and Telecommunications Research Institute, KR)
-date   : 2025‑07‑15
---------------------------------------------------------------------
-필요 폴더 구조
-├── ./cache/⟨angle⟩angle/cache_lodopab_train_fbp.npy
-├── ./cache/⟨angle⟩angle/cache_lodopab_validation_fbp.npy
-└── ./vit_checkpoint/imagenet21k/R50+ViT-B_16.npz
-"""
 
 # ------------------------------------------------------------------
 # 0) 공통 IMPORT 및 환경 설정
@@ -48,8 +39,7 @@ parser.add_argument('--epochs', type=int, default=250)
 parser.add_argument('--batch',  type=int, default=64)
 parser.add_argument('--base_lr', type=float, default=3e-4)
 parser.add_argument('--angles', nargs='+', type=int,
-                    # default=[1000, 500, 250, 125, 50],
-                    default=[25, 10],
+                    default=[1000, 500, 250, 125, 50],
                     help='list of projection angle counts')
 parser.add_argument('--cache_root', type=str, default='./cache',
                     help='root dir to store FBP caches')
@@ -203,7 +193,7 @@ for angle in args.angles:
                    log_dir / f'epoch_{ep+1:03d}.pth')
         if psnr > best_psnr:
             best_psnr = psnr
-            torch.save(net.state_dict(), log_dir/'best_model.pth')
+            torch.save(net.state_dict(), log_dir/'epoch_150.pth')
             print(f'    [+] New best model saved ({best_psnr:.2f} dB)')
 
 print('\n[Done] All angle experiments finished.')

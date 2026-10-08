@@ -1,90 +1,14 @@
+"""Later-stream inference for existing directional/repeated-FBP control checkpoints.
+
+Machine paths are explicit. This metric stream is distinct from the historical
+five-view evaluator in evaluate_cached.py.
+"""
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-LoDoPaB-CT TEST inference from cached FBP + 5-panel comparison PNG
-+ Report mean/std of PSNR, SSIM, RMSE for each model
-
-- Input FBP is loaded from cache (.npy), e.g.
-  /home/schoi/15_DIVAL/dival/dival/examples/cache/125angle/cache_lodopab_test_fbp.npy
-- GT is streamed from LoDoPaB dataset (test split)
-- Models:
-    1) UNet
-    2) TransUNet
-    3) WavResTransUNet
-- Save per-sample PNG (optional):
-    [GT | FBP_INPUT | UNET | TransUNET | WavResTransUNET]
-- Report metrics per model:
-    mean ± std of PSNR(dB), SSIM, RMSE
-- (추가) 0~1 범위 정규화 전/후 저장 및 시각화:
-    1) (0~1 범위로 맞추기 전) GT, FBP, UNet, TransUNet, Wav(Res)TransUNet의 개별 이미지를
-       PNG와 npy 로우파일로 저장 (각각 개별 파일로 저장)
-    2) (0~1 범위로 맞추고난 뒤) GT 기준(min-max)으로 0~1 정규화 후,
-       GT&GT, GT&FBP, GT&UNet, GT&TransUNet, GT&Wav(Res)TransUNet의 RMSE를 계산하고
-       |difference| 이미지를 5-panel로 구성하여 title에 RMSE를 달아 PNG로 저장
-    3) (0~1 범위로 맞추고난 뒤) GT, FBP, UNet, TransUNet, Wav(Res)TransUNet 5-panel을 구성하고
-       (GT 대비) PSNR(data_range=1) 계산값을 title로 넣어서 png 로 저장하기
-
-Example
--------
-CUDA_VISIBLE_DEVICES=0 \
-python inference_test_from_cache_compare_v2.py \
-  --angle 125 \
-  --cache_root /home/schoi/15_DIVAL/dival/dival/examples/cache \
-  --ckpt_wavres /home/schoi/15_DIVAL/dival/dival/examples/logs/lodopab_wavres_transunet_refine/125angle/best_model.pth \
-  --out_dir ./test_compare_out/125angle \
-  --img_size 352 \
-  --batch 16 \
-  --residual_out \
-  --unet_no_sigmoid \
-  --save_all_png
-
-python inference_test_from_cache_compare_v2.py \
-  --angle 250 \
-  --cache_root /home/schoi/15_DIVAL/dival/dival/examples/cache \
-  --ckpt_wavres /home/schoi/15_DIVAL/dival/dival/examples/logs/lodopab_wavres_transunet_refine/250angle/best_model.pth \
-  --out_dir ./test_compare_out/250angle \
-  --img_size 352 \
-  --batch 16 \
-  --residual_out \
-  --unet_no_sigmoid \
-  --save_all_png
-
-python inference_test_from_cache_compare_v2.py \
-  --angle 500 \
-  --cache_root /home/schoi/15_DIVAL/dival/dival/examples/cache \
-  --ckpt_wavres /home/schoi/15_DIVAL/dival/dival/examples/logs/lodopab_wavres_transunet_refine/500angle/epoch_150.pth \
-  --out_dir ./test_compare_out/500angle \
-  --img_size 352 \
-  --batch 16 \
-  --residual_out \
-  --unet_no_sigmoid \
-  --save_all_png
-
-python inference_test_from_cache_compare_v2.py \
-  --angle 1000 \
-  --cache_root /home/schoi/15_DIVAL/dival/dival/examples/cache \
-  --ckpt_wavres /home/schoi/15_DIVAL/dival/dival/examples/logs/lodopab_wavres_transunet_refine/1000angle/best_model.pth \
-  --out_dir ./test_compare_out/1000angle \
-  --img_size 352 \
-  --batch 16 \
-  --residual_out \
-  --unet_no_sigmoid \
-  --save_all_png
-
-python inference_test_from_cache_compare_v2.py \
-  --angle 50 \
-  --cache_root /home/schoi/15_DIVAL/dival/dival/examples/cache \
-  --ckpt_wavres /home/schoi/15_DIVAL/dival/dival/examples/logs/lodopab_wavres_transunet_refine/50angle/best_model.pth \
-  --out_dir ./test_compare_out/50angle \
-  --img_size 352 \
-  --batch 16 \
-  --residual_out \
-  --unet_no_sigmoid \
-  --save_all_png
-"""
 
 from pathlib import Path
 import argparse
+import os
 import numpy as np
 import math
 import csv
@@ -99,24 +23,51 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from dival.config import set_config
-set_config('lodopab_dataset/data_path', '/home/schoi/15_DIVAL/dival/dival/lodopab1')
+# LoDoPaB location: set LODOPAB_PATH to point DIVal at your copy of the dataset
+# P3 (Phase 3): honour LODOPAB_DATA first (the variable this study's run
+# scripts export), then the README's LODOPAB_PATH, then the original
+# explicit empty value; the entry point checks that the path was supplied.
+LODOPAB_PATH = os.environ.get(
+    'LODOPAB_DATA',
+    os.environ.get('LODOPAB_PATH',
+                   ''))
+if LODOPAB_PATH:
+    set_config('lodopab_dataset/data_path', LODOPAB_PATH)
 
 from dival import get_standard_dataset
 
-# --- UNet import (robust)
+# --- import shim (import mechanics only; the networks are byte-identical) ----
+# U-Net: the architecture now ships as src/unet.py (an unmodified copy of
+# DIVal's dival/reconstructors/networks/unet.py), so it can be built without
+# dragging in ODL/ASTRA through dival/__init__.py. DIVal remains the fallback.
 try:
-    from dival.reconstructors.networks.unet import get_unet_model  # DiVAL style
-except Exception:
+    from unet import get_unet_model
+except ImportError:
     try:
-        from dival.networks.unet import get_unet_model
-    except Exception as e:
-        raise ImportError(
-            "Cannot import get_unet_model from DiVAL. "
-            "Please check your DiVAL version / module path."
-        ) from e
+        from dival.reconstructors.networks.unet import get_unet_model  # DiVAL style
+    except Exception:
+        try:
+            from dival.networks.unet import get_unet_model
+        except Exception as e:
+            raise ImportError(
+                "Cannot import get_unet_model from src/unet.py or from DiVAL. "
+                "Please check your DiVAL version / module path."
+            ) from e
 
-from dival.networks.vit_seg_modeling import VisionTransformer as ViT_seg
-from dival.networks.vit_seg_modeling import CONFIGS as CFG_ViT
+# TransUNet: `dival.networks` is a directory that only ever existed in the
+# author's working copy and is in no released version of DIVal, so this import
+# failed for anyone else. The same files now ship in `src/`.
+try:
+    from vit_seg_modeling import VisionTransformer as ViT_seg
+    from vit_seg_modeling import CONFIGS as CFG_ViT
+except ImportError:
+    from dival.networks.vit_seg_modeling import VisionTransformer as ViT_seg
+    from dival.networks.vit_seg_modeling import CONFIGS as CFG_ViT
+
+# Wavelet front end: single shared implementation (see src/wavelet_ops.py).
+from wavelet_ops import (_upsample_like, haar_dwt_hvd, make_norm, ResBlock,
+                         WavMixResNet)
+# ---------------------------------------------------------------------------
 
 
 # -----------------------------
@@ -128,22 +79,22 @@ def get_args():
     # data
     p.add_argument('--angle', type=int, required=True)
     p.add_argument('--cache_root', type=str,
-                   default='/home/schoi/15_DIVAL/dival/dival/examples/cache',
+                   default='./cache',
                    help='root folder containing "{angle}angle/cache_lodopab_test_fbp.npy"')
     p.add_argument('--cache_fbp', type=str, default='',
                    help='optional: direct path to cache_lodopab_test_fbp.npy (overrides cache_root)')
 
     # checkpoints
     p.add_argument('--ckpt_unet', type=str,
-                   default='/home/schoi/15_DIVAL/dival/dival/examples/logs/lodopab_unet/125angle/best_model.pth')
+                   required=True)
     p.add_argument('--ckpt_transunet', type=str,
-                   default='/home/schoi/15_DIVAL/dival/dival/examples/logs/lodopab_transunet/125angle/best_model.pth')
+                   required=True)
     p.add_argument('--ckpt_wavres', type=str, required=True,
                    help='WavResTransUNet checkpoint (best_model.pth or epoch_xxx.pth)')
 
     # model build
     p.add_argument('--pretrained_npz', type=str,
-                   default='/home/schoi/15_DIVAL/dival/dival/vit_checkpoint/imagenet21k/R50+ViT-B_16.npz')
+                   default='')
 
     p.add_argument('--img_size', type=int, default=352)
     p.add_argument('--batch', type=int, default=16)
@@ -154,6 +105,9 @@ def get_args():
     p.add_argument('--wav_norm', type=str, default='gn', choices=['none', 'bn', 'in', 'gn'])
     p.add_argument('--wav_upsample', type=str, default='bilinear', choices=['nearest', 'bilinear'])
     p.add_argument('--residual_out', action='store_true')
+    # P11 (Phase 3, G1 gate): null control for the wavelet side channels.
+    p.add_argument('--wav_null', action='store_true',
+                   help='G1 control: replace H/V/D channels with copies of the FBP input')
 
     # UNet options (default: use sigmoid + use norm)
     p.add_argument('--unet_scales', type=int, default=5)
@@ -168,6 +122,10 @@ def get_args():
     p.add_argument('--dpi', type=int, default=150)
 
     # png saving control
+    # P12 (Phase 3): decouple raw-NPY dumping from PNG rendering. R2b needs the
+    # NPY for every test sample, but the PNG/5-panel figures only for a few.
+    p.add_argument('--save_npy_all', action='store_true',
+                   help='save raw NPY for ALL test samples (PNG still limited by png_n/save_all_png)')
     p.add_argument('--save_all_png', action='store_true',
                    help='save png for ALL test samples')
     p.add_argument('--png_n', type=int, default=50,
@@ -292,90 +250,12 @@ def ssim_torch(pred: torch.Tensor,
 
 
 # -----------------------------
-# Wavelet helpers (match training)
+# Wavelet front end (Haar DWT details + WavResNet mixture CNN)
+#   moved verbatim to src/wavelet_ops.py and imported at the top of this
+#   file, so training and inference execute the same code instead of two
+#   copies of it. Module and parameter names are unchanged, so existing
+#   checkpoints still load with strict=True.
 # -----------------------------
-def _upsample_like(x: torch.Tensor, ref: torch.Tensor, mode: str) -> torch.Tensor:
-    if x.shape[-2:] == ref.shape[-2:]:
-        return x
-    if mode == 'nearest':
-        return F.interpolate(x, size=ref.shape[-2:], mode='nearest')
-    return F.interpolate(x, size=ref.shape[-2:], mode='bilinear', align_corners=False)
-
-def haar_dwt_hvd(x: torch.Tensor):
-    B, C, H, W = x.shape
-    if (H % 2 != 0) or (W % 2 != 0):
-        raise ValueError(f'Haar DWT requires even H,W. Got {H}x{W}')
-
-    y = F.pixel_unshuffle(x, 2)              # (B, 4C, H/2, W/2)
-    y = y.view(B, C, 4, H // 2, W // 2)      # (B, C, 4, h, w)
-    x00 = y[:, :, 0]
-    x01 = y[:, :, 1]
-    x10 = y[:, :, 2]
-    x11 = y[:, :, 3]
-
-    ll = (x00 + x01 + x10 + x11) * 0.5
-    h  = (x00 - x01 + x10 - x11) * 0.5
-    v  = (x00 + x01 - x10 - x11) * 0.5
-    d  = (x00 - x01 - x10 + x11) * 0.5
-    return ll, h, v, d
-
-
-# -----------------------------
-# WavResNet (MATCH training names!)
-# -----------------------------
-def make_norm(norm: str, num_ch: int):
-    if norm == 'none':
-        return nn.Identity()
-    if norm == 'bn':
-        return nn.BatchNorm2d(num_ch)
-    if norm == 'in':
-        return nn.InstanceNorm2d(num_ch, affine=True)
-    if norm == 'gn':
-        g = 8 if num_ch >= 8 else 1
-        return nn.GroupNorm(num_groups=g, num_channels=num_ch)
-    raise ValueError(norm)
-
-class ResBlock(nn.Module):
-    def __init__(self, ch: int, norm: str = 'gn'):
-        super().__init__()
-        self.conv1 = nn.Conv2d(ch, ch, 3, padding=1, bias=False)
-        self.norm1 = make_norm(norm, ch)
-        self.conv2 = nn.Conv2d(ch, ch, 3, padding=1, bias=False)
-        self.norm2 = make_norm(norm, ch)
-        self.act = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        h = x
-        x = self.conv1(x)
-        x = self.norm1(x)
-        x = self.act(x)
-        x = self.conv2(x)
-        x = self.norm2(x)
-        x = x + h
-        x = self.act(x)
-        return x
-
-class WavMixResNet(nn.Module):
-    def __init__(self, in_ch: int = 4, out_ch: int = 1, base_ch: int = 64,
-                 num_blocks: int = 8, norm: str = 'gn'):
-        super().__init__()
-        self.in_proj  = nn.Conv2d(in_ch, base_ch, 3, padding=1, bias=False)
-        self.in_norm  = make_norm(norm, base_ch)
-        self.act      = nn.ReLU(inplace=True)
-
-        self.blocks = nn.Sequential(*[ResBlock(base_ch, norm=norm) for _ in range(num_blocks)])
-
-        self.out_proj = nn.Conv2d(base_ch, out_ch, 3, padding=1, bias=True)
-        self.skip_proj = nn.Conv2d(in_ch, out_ch, 1, bias=True)
-
-    def forward(self, x4):
-        y = self.in_proj(x4)
-        y = self.in_norm(y)
-        y = self.act(y)
-        y = self.blocks(y)
-        y = self.out_proj(y)
-        return y + self.skip_proj(x4)
-
 
 # -----------------------------
 # TransUNet build (match training)
@@ -405,16 +285,20 @@ class WavResTransUNet(nn.Module):
                  wav_blocks: int = 8,
                  wav_norm: str = 'gn',
                  wav_upsample: str = 'bilinear',
-                 residual_out: bool = False):
+                 residual_out: bool = False,
+                 wav_null: bool = False):
         super().__init__()
         self.wav_upsample = wav_upsample
         self.mix = WavMixResNet(in_ch=4, out_ch=1, base_ch=wav_base_ch,
                                 num_blocks=wav_blocks, norm=wav_norm)
         self.transunet = build_transunet(img_size, pretrained_npz)
         self.residual_out = residual_out
+        self.wav_null = wav_null          # P11 — G1 null control
 
     def forward(self, x):
         _, h, v, d = haar_dwt_hvd(x)  # (B,1,H/2,W/2)
+        if getattr(self, 'wav_null', False):          # P11 — G1 null control
+            h, v, d = x.clone(), x.clone(), x.clone()
         h = _upsample_like(h, x, mode=self.wav_upsample)
         v = _upsample_like(v, x, mode=self.wav_upsample)
         d = _upsample_like(d, x, mode=self.wav_upsample)
@@ -444,7 +328,10 @@ def _maybe_strip_prefix(sd: dict, prefix: str) -> dict:
     return sd
 
 def load_weights_strict_match(model: nn.Module, ckpt_path: str, device: torch.device):
-    ckpt = torch.load(ckpt_path, map_location='cpu')
+    # P7: torch>=2.6 flips torch.load's weights_only default to True, which
+    # rejects these checkpoints (they store args/optimizer state, not just
+    # tensors). Be explicit so the code works on both sides of that change.
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     sd0 = _extract_state_dict(ckpt)
     if not isinstance(sd0, dict):
         raise RuntimeError(f'Checkpoint is not a state_dict/dict: {ckpt_path}')
@@ -776,6 +663,72 @@ def write_report(out_dir: Path, angle: int, ckpts: dict, metrics: dict):
     print(f"[SAVE] metrics_report.csv -> {csv_path}")
 
 
+def write_per_image_metrics(out_dir: Path, metrics: dict, angle: int = 0):
+    """Dump one row per test slice: metrics_per_test.csv.
+
+    The aggregate report above only carries mean +- SD, which is not enough for
+    a paired analysis: bootstrap CIs, Wilcoxon signed-rank tests and effect
+    sizes all need the per-image values, and a reviewer asking for them cannot
+    be answered without rerunning inference.
+
+    The variant of this script that was released omitted the dump, although the
+    script that produced the published table wrote exactly this file
+    (`inference_test_from_cache_compare_5panel.py`, lines 935-964). The columns
+    and their order are kept identical to that file so the CSVs are
+    interchangeable; the only change is that this version uses `csv` rather
+    than pandas, to avoid adding a dependency for one table.
+    """
+    model_cols = [
+        ("FBP_INPUT", "fbp"),
+        ("UNet", "unet"),
+        ("TransUNet", "transunet"),
+        ("WavResTransUNet", "wavtransunet"),
+    ]
+
+    num_samples = len(metrics["FBP_INPUT"]["psnr"])
+    for model_name, _ in model_cols:
+        n = len(metrics[model_name]["psnr"])
+        if n != num_samples:
+            raise RuntimeError(
+                f"per-image metric length mismatch: {model_name} has {n} entries, "
+                f"FBP_INPUT has {num_samples}")
+
+    header = ["test_idx"]
+    for _, prefix in model_cols:
+        header += [f"{prefix}_psnr", f"{prefix}_ssim", f"{prefix}_rmse"]
+
+    csv_path = out_dir / "metrics_per_test.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        for i in range(num_samples):
+            row = [i]
+            for model_name, _ in model_cols:
+                row += [metrics[model_name]["psnr"][i],
+                        metrics[model_name]["ssim"][i],
+                        metrics[model_name]["rmse"][i]]
+            w.writerow(row)
+
+    print(f"[SAVE] metrics_per_test.csv ({num_samples} rows) -> {csv_path}")
+
+    # P10 (long form): the wide table above keeps the column layout of the file
+    # that produced the published table, so the two are interchangeable. The
+    # paired-statistics tooling groups by (angle, index, model) instead, so the
+    # same numbers are also written one row per (slice, model).
+    long_path = out_dir / "per_image_metrics.csv"
+    with open(long_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["angle", "index", "model", "psnr", "ssim", "rmse"])
+        for model_name, _ in model_cols:
+            for i in range(num_samples):
+                w.writerow([angle, i, model_name,
+                            metrics[model_name]["psnr"][i],
+                            metrics[model_name]["ssim"][i],
+                            metrics[model_name]["rmse"][i]])
+    print(f"[SAVE] per_image_metrics.csv "
+          f"({len(model_cols) * num_samples} rows) -> {long_path}")
+
+
 # -----------------------------
 # (추가) 0~1 정규화 헬퍼: GT 기준 min-max로 일괄 스케일링
 # -----------------------------
@@ -857,6 +810,8 @@ def main():
     print(f"[INFO] #test samples from cache: {n_test}")
 
     # dataset only for GT (test) - stream in same order
+    if not LODOPAB_PATH:
+        raise ValueError('Set LODOPAB_DATA or LODOPAB_PATH explicitly')
     dataset = get_standard_dataset('lodopab', impl='astra_cuda', num_angles=args.angle)
 
     # make gt iterator in test order (avoid random access)
@@ -901,8 +856,10 @@ def main():
         wav_blocks=args.wav_blocks,
         wav_norm=args.wav_norm,
         wav_upsample=args.wav_upsample,
-        residual_out=args.residual_out
+        residual_out=args.residual_out,
+        wav_null=bool(args.wav_null),
     )
+    print(f"[P11] wav_null={bool(args.wav_null)}")
 
     # load weights (strict)
     unet_model = load_weights_strict_match(unet_model, args.ckpt_unet, device=device).eval()
@@ -1049,12 +1006,28 @@ def main():
 
         # save per-sample outputs (raw individual + norm 5panel(psnr) + norm diff 5panel(rmse))
         for i, idx in enumerate(idxs):
-            if idx not in save_indices:
+            # P12: NPY for all (when requested), PNG only for selected indices.
+            do_npy = bool(args.save_npy_all) or (idx in save_indices)
+            do_png = (idx in save_indices)
+            if not (do_npy or do_png):
                 continue
 
             # -----------------------------------------
             # (추가-1) 0~1 범위로 맞추기 전 개별 이미지 PNG + NPY 저장
             # -----------------------------------------
+            # npy raw 저장 (P12: gated by do_npy)
+            if do_npy:
+                np.save(raw_npy_dirs["GT"] / f"test_idx_{idx:05d}.npy", y_np[i].astype(np.float32))
+                np.save(raw_npy_dirs["FBP"] / f"test_idx_{idx:05d}.npy", x_np[i].astype(np.float32))
+                np.save(raw_npy_dirs["UNet"] / f"test_idx_{idx:05d}.npy", out_unet_np[i].astype(np.float32))
+                np.save(raw_npy_dirs["TransUNet"] / f"test_idx_{idx:05d}.npy", out_trans_np[i].astype(np.float32))
+                np.save(raw_npy_dirs["WavTransUNet"] / f"test_idx_{idx:05d}.npy", out_wav_np[i].astype(np.float32))
+
+            # P12: everything below is figure rendering (raw PNG, 5-panel,
+            #      difference maps). Skip it for samples that are NPY-only.
+            if not do_png:
+                continue
+
             # raw 시각화 vmin/vmax는 (해당 샘플의 5개 이미지 concat 기반) robust로 통일
             concat_raw = np.concatenate([
                 y_np[i].ravel(),
@@ -1064,13 +1037,6 @@ def main():
                 out_wav_np[i].ravel()
             ], axis=0)
             vmin_raw, vmax_raw = _robust_vmin_vmax(concat_raw, lo=1.0, hi=99.0)
-
-            # npy raw 저장
-            np.save(raw_npy_dirs["GT"] / f"test_idx_{idx:05d}.npy", y_np[i].astype(np.float32))
-            np.save(raw_npy_dirs["FBP"] / f"test_idx_{idx:05d}.npy", x_np[i].astype(np.float32))
-            np.save(raw_npy_dirs["UNet"] / f"test_idx_{idx:05d}.npy", out_unet_np[i].astype(np.float32))
-            np.save(raw_npy_dirs["TransUNet"] / f"test_idx_{idx:05d}.npy", out_trans_np[i].astype(np.float32))
-            np.save(raw_npy_dirs["WavTransUNet"] / f"test_idx_{idx:05d}.npy", out_wav_np[i].astype(np.float32))
 
             # png raw 저장
             save_single_png(raw_png_dirs["GT"] / f"test_idx_{idx:05d}.png", y_np[i], vmin_raw, vmax_raw)
@@ -1183,6 +1149,7 @@ def main():
     print("==================================================================\n")
 
     write_report(out_dir=out_dir, angle=args.angle, ckpts=ckpts, metrics=metrics)
+    write_per_image_metrics(out_dir=out_dir, metrics=metrics, angle=args.angle)
 
     print(f"[SAVE] raw individual PNG root: {raw_png_root}")
     print(f"[SAVE] raw individual NPY root: {raw_npy_root}")

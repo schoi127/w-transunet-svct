@@ -1,54 +1,6 @@
+"""Model-forward profiling source with machine-specific path defaults removed."""
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Compute FLOPs / Params / Memory metrics for 3 models:
-  1) U-Net (DIVal FBPUNetReconstructor.model)
-  2) TransUNet (R50+ViT-B_16) baseline
-  3) W-TransUNet (Haar DWT + WavMixResNet + TransUNet)
-
-Outputs:
-  - Markdown table (stdout)
-  - Optional: CSV / JSON / LaTeX tabular
-
-FLOPs counting:
-  - Uses torch.utils.flop_counter.FlopCounterMode (no external deps).
-  - Forward FLOPs: model(x) under no_grad
-  - Train-step FLOPs: model(x) -> MSE -> backward (forward+backward)
-
-Notes:
-  - FlopCounterMode only counts ops in its registry (conv/mm/bmm/attention/...).
-    Elementwise ops (ReLU, add, norm, upsample) are typically not counted.
-  - For paper tables, this is usually acceptable / standard.
-
-Example:
-  CUDA_VISIBLE_DEVICES=0 python compute_metrics_models.py \
-    --img_size 352 \
-    --epochs 250 \
-    --angles 1000 500 250 125 50 \
-    --cache_root ./cache \
-    --lodopab_path /home/schoi/15_DIVAL/dival/dival/lodopab1 \
-    --ray_impl astra_cuda \
-    --device cuda \
-    --profile_memory \
-    --profile_time --time_iters 50 --time_warmup 10 \
-    --out_csv metrics.csv \
-    --out_tex metrics_table.tex \
-    --out_json metrics.json
-
-python compute_metrics_models.py \
-  --img_size 352 \
-  --epochs 250 \
-  --angles 1000 500 250 125 50 \
-  --cache_root ./cache \
-  --lodopab_path /home/schoi/15_DIVAL/dival/dival/lodopab1 \
-  --ray_impl astra_cuda \
-  --device cuda \
-  --out_csv metrics.csv \
-  --out_tex metrics_table.tex \
-  --out_json metrics.json
-Author: (generated) for Sunghoon Choi (ETRI)
-Date: 2026-02-26
-"""
 
 from __future__ import annotations
 
@@ -368,98 +320,14 @@ def profile_latency_ms(model: nn.Module, x: torch.Tensor, y: Optional[torch.Tens
 
 # =========================================================
 # Model definitions (TransUNet / W-TransUNet)
-#   - These mirror the attached training code
+#   The wavelet front end (haar_dwt_hvd / _upsample_like / make_norm /
+#   ResBlock / WavMixResNet) is imported from src/wavelet_ops.py, which
+#   holds the definitions copied verbatim from the training script. It
+#   used to be a third private copy in this file; a complexity table has
+#   to be measured on the same code that is trained, so the copy is gone.
 # =========================================================
-def make_norm(norm: str, num_ch: int) -> nn.Module:
-    if norm == "none":
-        return nn.Identity()
-    if norm == "bn":
-        return nn.BatchNorm2d(num_ch)
-    if norm == "in":
-        return nn.InstanceNorm2d(num_ch, affine=True)
-    if norm == "gn":
-        g = 8 if num_ch >= 8 else 1
-        return nn.GroupNorm(num_groups=g, num_channels=num_ch)
-    raise ValueError(f"Unknown norm: {norm}")
-
-
-class ResBlock(nn.Module):
-    def __init__(self, ch: int, norm: str = "gn"):
-        super().__init__()
-        self.conv1 = nn.Conv2d(ch, ch, 3, padding=1, bias=False)
-        self.norm1 = make_norm(norm, ch)
-        self.conv2 = nn.Conv2d(ch, ch, 3, padding=1, bias=False)
-        self.norm2 = make_norm(norm, ch)
-        self.act = nn.ReLU(inplace=True)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = x
-        x = self.conv1(x)
-        x = self.norm1(x)
-        x = self.act(x)
-        x = self.conv2(x)
-        x = self.norm2(x)
-        x = x + h
-        x = self.act(x)
-        return x
-
-
-class WavMixResNet(nn.Module):
-    """
-    Input: 4ch (FBP, H, V, D) @ full-res
-    Output: 1ch mixture
-    """
-    def __init__(self, in_ch: int = 4, out_ch: int = 1, base_ch: int = 64,
-                 num_blocks: int = 8, norm: str = "gn"):
-        super().__init__()
-        self.in_proj = nn.Conv2d(in_ch, base_ch, 3, padding=1, bias=False)
-        self.in_norm = make_norm(norm, base_ch)
-        self.act = nn.ReLU(inplace=True)
-
-        self.blocks = nn.Sequential(*[ResBlock(base_ch, norm=norm) for _ in range(num_blocks)])
-
-        self.out_proj = nn.Conv2d(base_ch, out_ch, 3, padding=1, bias=True)
-        self.skip_proj = nn.Conv2d(in_ch, out_ch, 1, bias=True)
-
-    def forward(self, x4: torch.Tensor) -> torch.Tensor:
-        y = self.in_proj(x4)
-        y = self.in_norm(y)
-        y = self.act(y)
-        y = self.blocks(y)
-        y = self.out_proj(y)
-        return y + self.skip_proj(x4)
-
-
-def _upsample_like(x: torch.Tensor, ref: torch.Tensor, mode: str) -> torch.Tensor:
-    if x.shape[-2:] == ref.shape[-2:]:
-        return x
-    if mode == "nearest":
-        return F.interpolate(x, size=ref.shape[-2:], mode="nearest")
-    # bilinear
-    return F.interpolate(x, size=ref.shape[-2:], mode="bilinear", align_corners=False)
-
-
-def haar_dwt_hvd(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Haar 2D DWT (1-level) returning (LL, H, V, D).
-    x: (B,C,H,W) with even H,W
-    """
-    B, C, H, W = x.shape
-    if (H % 2 != 0) or (W % 2 != 0):
-        raise ValueError(f"Haar DWT requires even H,W. Got {H}x{W}")
-
-    y = F.pixel_unshuffle(x, 2)          # (B, 4C, H/2, W/2)
-    y = y.view(B, C, 4, H // 2, W // 2)  # (B, C, 4, h, w)
-    x00 = y[:, :, 0]
-    x01 = y[:, :, 1]
-    x10 = y[:, :, 2]
-    x11 = y[:, :, 3]
-
-    ll = (x00 + x01 + x10 + x11) * 0.5
-    h  = (x00 - x01 + x10 - x11) * 0.5
-    v  = (x00 + x01 - x10 - x11) * 0.5
-    d  = (x00 - x01 - x10 + x11) * 0.5
-    return ll, h, v, d
+from wavelet_ops import (_upsample_like, haar_dwt_hvd, make_norm,  # noqa: E402
+                         ResBlock, WavMixResNet)
 
 
 def build_transunet(img_size: int,
@@ -468,14 +336,25 @@ def build_transunet(img_size: int,
     """
     Baseline TransUNet from DIVal: ViT_seg + CFG_ViT['R50-ViT-B_16']
     """
+    # --- import shim (import mechanics only; the network is byte-identical) --
+    # `dival.networks` is a directory that only ever existed in the author's
+    # working copy and is in no released version of DIVal, so this import failed
+    # for everyone else and no cell of the complexity table could be reproduced
+    # from the released repository. The same files now ship in `src/`; the DIVal
+    # path is kept as a fallback so the original environment resolves as before.
     try:
-        from dival.networks.vit_seg_modeling import VisionTransformer as ViT_seg
-        from dival.networks.vit_seg_modeling import CONFIGS as CFG_ViT
-    except Exception as e:
-        raise RuntimeError(
-            "Failed to import DIVal TransUNet (dival.networks.vit_seg_modeling). "
-            "Please ensure 'dival' is installed and accessible."
-        ) from e
+        from vit_seg_modeling import VisionTransformer as ViT_seg
+        from vit_seg_modeling import CONFIGS as CFG_ViT
+    except ImportError:
+        try:
+            from dival.networks.vit_seg_modeling import VisionTransformer as ViT_seg
+            from dival.networks.vit_seg_modeling import CONFIGS as CFG_ViT
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to import the TransUNet definition from src/vit_seg_modeling.py "
+                "or from dival.networks.vit_seg_modeling."
+            ) from e
+    # ------------------------------------------------------------------------
 
     cfg = CFG_ViT["R50-ViT-B_16"]
     cfg.pretrained_path = pretrained_npz
@@ -510,7 +389,8 @@ class WavResTransUNet(nn.Module):
                  wav_norm: str = "gn",
                  wav_upsample: str = "bilinear",
                  residual_out: bool = False,
-                 load_pretrained_if_exists: bool = False):
+                 load_pretrained_if_exists: bool = False,
+                 wav_null: bool = False):
         super().__init__()
         self.wav_upsample = wav_upsample
         self.mix = WavMixResNet(in_ch=4, out_ch=1, base_ch=wav_base_ch,
@@ -521,9 +401,12 @@ class WavResTransUNet(nn.Module):
             load_pretrained_if_exists=load_pretrained_if_exists,
         )
         self.residual_out = residual_out
+        self.wav_null = wav_null          # P11 — G1 null control
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         _, h, v, d = haar_dwt_hvd(x)
+        if getattr(self, 'wav_null', False):          # P11 — G1 null control
+            h, v, d = x.clone(), x.clone(), x.clone()
         h = _upsample_like(h, x, mode=self.wav_upsample)
         v = _upsample_like(v, x, mode=self.wav_upsample)
         d = _upsample_like(d, x, mode=self.wav_upsample)
@@ -582,6 +465,51 @@ def build_unet_from_dival(lodopab_path: str, ray_impl: str, angle_for_raytrafo: 
     model = reconstructor.model
     if isinstance(model, torch.nn.DataParallel):
         model = model.module
+    return model
+
+
+def build_unet_local() -> nn.Module:
+    """Build the same U-Net without the DIVal runtime.
+
+    `build_unet_from_dival()` above needs ODL, the ASTRA toolbox and a LoDoPaB
+    installation -- not because the U-Net needs them, but because it reaches the
+    architecture through a dataset and a ray transform. Requiring a CUDA/ASTRA
+    stack in order to count parameters is the reason this script could not be
+    run at all outside the author's machine.
+
+    This path builds the identical `nn.Module` directly from the shipped copy of
+    DIVal's architecture, using FBPUNetReconstructor's own hyper-parameter
+    defaults (fbpunet_reconstructor.py: scales=5, skip_channels=4,
+    channels=(32, 32, 64, 64, 128, 128), use_sigmoid=False; init_bias_zero=True
+    is applied as in `init_model()`). It is a construction shortcut, not a
+    different network: the resulting module has 610,673 parameters, matching the
+    reported U-Net row exactly.
+
+    Caveat, stated rather than hidden: if a downloaded fbpunet/lodopab
+    `hyper_params.json` overrides any of those four values, the DIVal path is
+    authoritative and this one is not. Use --unet_builder dival when the DIVal
+    runtime is available.
+    """
+    try:
+        from unet import UNet
+    except ImportError:
+        from dival.reconstructors.networks.unet import UNet
+
+    scales = 5
+    skip_channels = 4
+    channels = (32, 32, 64, 64, 128, 128)
+    use_sigmoid = False
+
+    model = UNet(in_ch=1, out_ch=1,
+                 channels=channels[:scales],
+                 skip_channels=[skip_channels] * scales,
+                 use_sigmoid=use_sigmoid)
+
+    def weights_init(m):  # init_bias_zero=True in FBPUNetReconstructor
+        if isinstance(m, torch.nn.Conv2d):
+            m.bias.data.fill_(0.0)
+
+    model.apply(weights_init)
     return model
 
 
@@ -669,10 +597,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache_root", type=str, default="./cache",
                    help="Used only to infer train_samples quickly (mmap).")
 
+    # Model selection
+    p.add_argument("--models", nargs="+", default=["unet", "transunet", "wtransunet"],
+                   choices=["unet", "transunet", "wtransunet"],
+                   help="Which models to measure. The TransUNet rows need only "
+                        "torch; the DIVal U-Net path additionally needs ODL/ASTRA.")
+    p.add_argument("--unet_builder", type=str, default="auto",
+                   choices=["auto", "dival", "local"],
+                   help="How to obtain the U-Net: 'dival' goes through "
+                        "FBPUNetReconstructor (needs ODL/ASTRA/LoDoPaB), 'local' "
+                        "instantiates the shipped architecture directly, 'auto' "
+                        "tries DIVal and falls back to local.")
+
     # DIVal / LoDoPaB
+    # LODOPAB_PATH environment variable is honoured (README section 3); with it
+    # unset an explicit dataset path is required for the DIVal builder.
     p.add_argument("--lodopab_path", type=str,
-                   default="/home/schoi/15_DIVAL/dival/dival/lodopab1",
-                   help="LoDoPaB dataset path used by DIVal set_config.")
+                   default=os.environ.get(
+                       "LODOPAB_DATA",
+                       os.environ.get("LODOPAB_PATH",
+                                      "")),
+                   help="LoDoPaB dataset path used by DIVal set_config "
+                        "(defaults to $LODOPAB_PATH when set).")
     p.add_argument("--ray_impl", type=str, default="astra_cuda",
                    help="DIVal dataset implementation for ray_trafo (e.g., astra_cuda / astra).")
     p.add_argument("--angle_for_raytrafo", type=int, default=1000,
@@ -680,7 +626,7 @@ def parse_args() -> argparse.Namespace:
 
     # TransUNet pretrained npz (optional)
     p.add_argument("--pretrained_npz", type=str,
-                   default="/home/schoi/15_DIVAL/dival/dival/vit_checkpoint/imagenet21k/R50+ViT-B_16.npz")
+                   default="")
     p.add_argument("--load_pretrained", action="store_true",
                    help="If set AND pretrained_npz exists, load ImageNet-21k weights (not needed for FLOPs).")
 
@@ -690,6 +636,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wav_norm", type=str, default="gn", choices=["none", "bn", "in", "gn"])
     p.add_argument("--wav_upsample", type=str, default="bilinear", choices=["nearest", "bilinear"])
     p.add_argument("--residual_out", action="store_true")
+    # P11 (Phase 3, G1 gate): null control for the wavelet side channels.
+    # NOTE: never enable this for the Table 2 complexity numbers (it removes
+    # the DWT/upsample work and therefore changes FLOPs).
+    p.add_argument("--wav_null", action="store_true",
+                   help="G1 control: replace H/V/D channels with copies of the FBP input")
 
     # Optional profiling
     p.add_argument("--profile_memory", action="store_true",
@@ -751,52 +702,93 @@ def main():
     # -------------------------------------------------
     print("\n[INFO] Building models ...")
 
-    # 1) U-Net via DIVal
-    try:
-        unet = build_unet_from_dival(
-            lodopab_path=args.lodopab_path,
-            ray_impl=args.ray_impl,
-            angle_for_raytrafo=int(args.angle_for_raytrafo),
-        ).to(device)
-        unet_name = "U-Net (DIVal FBPUNet)"
-    except Exception as e:
-        print(f"[ERROR] Failed to build U-Net from DIVal: {e}")
-        raise
+    selected = set(args.models)
+    models: List[Tuple[str, nn.Module]] = []
+    build_failures: List[str] = []   # models that could not be measured at all
+    build_notes: List[str] = []      # a builder that failed but was recovered from
+
+    # 1) U-Net.  --unet_builder auto: try DIVal first (the runtime path the
+    #    baseline was trained through) and fall back to the shipped architecture
+    #    when the DIVal/ODL/ASTRA stack is absent. A failure here no longer
+    #    aborts the whole run: the two TransUNet rows do not depend on DIVal and
+    #    there is no reason a reviewer without ASTRA should lose them as well.
+    if "unet" in selected:
+        unet, unet_name = None, "U-Net"
+        if args.unet_builder in ("auto", "dival"):
+            try:
+                unet = build_unet_from_dival(
+                    lodopab_path=args.lodopab_path,
+                    ray_impl=args.ray_impl,
+                    angle_for_raytrafo=int(args.angle_for_raytrafo),
+                ).to(device)
+                unet_name = "U-Net (DIVal FBPUNet)"
+            except Exception as e:
+                dival_err = f"U-Net via DIVal: {type(e).__name__}: {e}"
+                print(f"[WARN] Failed to build {dival_err}")
+                if args.unet_builder == "dival":
+                    raise
+                build_notes.append(dival_err)
+        if unet is None and args.unet_builder in ("auto", "local"):
+            try:
+                unet = build_unet_local().to(device)
+                unet_name = "U-Net (DIVal FBPUNet architecture, built locally)"
+                print("[INFO] U-Net built from the shipped architecture "
+                      "(src/unet.py); no DIVal runtime required.")
+            except Exception as e:
+                msg = f"U-Net locally: {type(e).__name__}: {e}"
+                print(f"[ERROR] Failed to build {msg}")
+                build_failures.append(msg)
+        if unet is not None:
+            models.append((unet_name, unet))
+        else:
+            build_failures.extend(build_notes)
+            build_notes = []
 
     # 2) TransUNet baseline (no wavelet mix)
-    try:
-        transunet = build_transunet(
-            img_size=img_size,
-            pretrained_npz=args.pretrained_npz,
-            load_pretrained_if_exists=bool(args.load_pretrained),
-        ).to(device)
-        transunet_name = "TransUNet (R50+ViT-B_16)"
-    except Exception as e:
-        print(f"[ERROR] Failed to build TransUNet: {e}")
-        raise
+    if "transunet" in selected:
+        try:
+            transunet = build_transunet(
+                img_size=img_size,
+                pretrained_npz=args.pretrained_npz,
+                load_pretrained_if_exists=bool(args.load_pretrained),
+            ).to(device)
+            models.append(("TransUNet (R50+ViT-B_16)", transunet))
+        except Exception as e:
+            print(f"[ERROR] Failed to build TransUNet: {e}")
+            raise
 
     # 3) W-TransUNet
-    try:
-        w_transunet = WavResTransUNet(
-            img_size=img_size,
-            pretrained_npz=args.pretrained_npz,
-            wav_base_ch=int(args.wav_base_ch),
-            wav_blocks=int(args.wav_blocks),
-            wav_norm=str(args.wav_norm),
-            wav_upsample=str(args.wav_upsample),
-            residual_out=bool(args.residual_out),
-            load_pretrained_if_exists=bool(args.load_pretrained),
-        ).to(device)
-        w_transunet_name = "W-TransUNet (Wavelet+Mix+TransUNet)"
-    except Exception as e:
-        print(f"[ERROR] Failed to build W-TransUNet: {e}")
-        raise
+    if "wtransunet" in selected:
+        try:
+            w_transunet = WavResTransUNet(
+                img_size=img_size,
+                pretrained_npz=args.pretrained_npz,
+                wav_base_ch=int(args.wav_base_ch),
+                wav_blocks=int(args.wav_blocks),
+                wav_norm=str(args.wav_norm),
+                wav_upsample=str(args.wav_upsample),
+                residual_out=bool(args.residual_out),
+                load_pretrained_if_exists=bool(args.load_pretrained),
+                wav_null=bool(args.wav_null),
+            ).to(device)
+            print(f"[P11] wav_null={bool(args.wav_null)}")
+            models.append(("W-TransUNet (Wavelet+Mix+TransUNet)", w_transunet))
+        except Exception as e:
+            print(f"[ERROR] Failed to build W-TransUNet: {e}")
+            raise
 
-    models = [
-        (unet_name, unet),
-        (transunet_name, transunet),
-        (w_transunet_name, w_transunet),
-    ]
+    if not models:
+        raise RuntimeError("No model could be built; nothing to measure. "
+                           + " | ".join(build_failures))
+    if build_failures:
+        print("\n[WARN] Some models were skipped and are missing from the table:")
+        for m in build_failures:
+            print(f"       - {m}")
+    if build_notes:
+        print("\n[NOTE] A preferred builder failed but the model was still built:")
+        for m in build_notes:
+            print(f"       - {m}")
+        print("       The model name in the table states which builder was used.")
 
     # -------------------------------------------------
     # Measure metrics

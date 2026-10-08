@@ -1,73 +1,6 @@
+# Archival source; complete checkpoint-generating run provenance is unavailable.
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-LoDoPaB‑CT Sparse-view FBP → WavResTransUNet 학습 스크립트
-핵심 아이디어:
-1) 입력 FBP(1ch)에서 Haar wavelet 1-level 분해로 H/V/D detail(3ch) 추출
-2) (FBP + H + V + D)=4ch 입력을 WavResNet(Residual CNN)에서 mixture(혼합/정제)
-3) mixture 결과(1ch)를 TransUNet(ResNet+ViT encoder + U-Net decoder)에 입력하여 GT 회귀
-4) (옵션) wavelet-detail loss를 추가하여 streak artifact(방향성 고주파)를 더 강하게 제약 추가 기능(요청 반영):
- - best model: PSNR 갱신 시 즉시 저장 (best_model.pth)
-  - 주기 저장: 매 save_every epoch마다 모델 저장 (+ 마지막 epoch 저장)
-   - 주기 시각화: 매 viz_every epoch마다 validation 이미지 5개를 뽑아 FBP/GT/Output 비교 PNG 저장 (val_compare_epoch_XXX.png)
-   예시 실행:
-   CUDA_VISIBLE_DEVICES=0 \
-   python train_wavres_transunet_lodopab.py \
-   --angles 25 10 \
-   --img_size 352 \
-   --epochs 150 \
-   --batch 32 \
-   --base_lr 3e-4 \
-   --wav_base_ch 64 \
-   --wav_blocks 8 \
-   --wav_norm gn \
-   --wav_loss_weight 0.05 \
-   --residual_out \
-   --amp \
-   --num_workers 8 \
-   --pin_memory \
-   --cache_root ./cache \
-   --log_root ./logs/lodopab_wavres_transunet_refine
---------------------------------------------------------------------
-
-추가/개선(재시작·복구):
-  - --resume 옵션 추가:
-      * none(default): 새로 학습
-      * auto: last.pth(있으면) → 가장 최신 epoch_XXX.pth → best_model.pth 순으로 자동 선택
-      * last: last.pth(있으면) → 가장 최신 epoch_XXX.pth
-      * best: best_model.pth
-      * 또는 임의의 .pth 경로
-  - 체크포인트에 model뿐 아니라 optimizer/scheduler/scaler/best_psnr/epoch 등을 함께 저장
-    (=> 터미널 중단 시 '정확히' 이어서 학습 가능)
-  - 매 epoch 종료 시 last.pth를 갱신 저장(덮어쓰기) → 갑작스런 중단에도 손실 최소화
-  - 기존(레거시) state_dict만 저장된 epoch_060.pth / best_model.pth도 로드 가능
-    단, 그 경우 optimizer/scheduler 상태는 복구 불가 → 최대한 스케줄을 맞춰 재구성
-
-예) xxx_epoch에서 중단되었을 때(마지막 완료 epoch=68 가정)
-  - 새 코드로 학습했었다면:
-      --resume auto   (last.pth로부터 epoch 69부터 자동 재개)
-  - 예전 코드로 저장된 weight-only best_model.pth만 있다면:
-      --resume best --resume_epoch 68
-  CUDA_VISIBLE_DEVICES=0 \
-  python train_wavres_transunet_lodopab.py \
-  --angles 125 \
-  --img_size 352 \
-  --epochs 250 \
-  --batch 32 \
-  --base_lr 3e-4 \
-  --wav_base_ch 64 \
-  --wav_blocks 8 \
-  --wav_norm gn \
-  --wav_loss_weight 0.05 \
-  --residual_out \
-  --amp \
-  --num_workers 8 \
-  --pin_memory \
-  --cache_root "/home/schoi/15_DIVAL/dival/dival/examples/cache" \
-  --log_root "/home/schoi/15_DIVAL/dival/dival/examples/logs/lodopab_wavres_transunet_refine" \
-  --resume "/home/schoi/15_DIVAL/dival/dival/examples/logs/lodopab_wavres_transunet_refine/125angle/epoch_060.pth"
-
-"""
 
 # ------------------------------------------------------------------
 # 0) IMPORT 및 환경 설정
@@ -157,7 +90,7 @@ def get_args():
     parser.add_argument('--residual_out', action='store_true',
                         help='if set, final output = mixture_input + transunet_output')
 
-    # ✅ 저장/시각화 주기 옵션
+    # 저장/시각화 주기 옵션
     parser.add_argument('--save_every', type=int, default=10,
                         help='save checkpoint every N epochs')
     parser.add_argument('--viz_every', type=int, default=10,
@@ -167,11 +100,11 @@ def get_args():
     parser.add_argument('--viz_seed', type=int, default=0,
                         help='seed to choose fixed validation samples for visualization')
 
-    # ✅ 재시작/복구 옵션
+    # 재시작/복구 옵션
     parser.add_argument('--resume', type=str, default='none',
                         help=("Resume training. "
                               "none(default) | auto | last | best | <path_to_ckpt>. "
-                              "auto: last.pth -> latest epoch_*.pth -> best_model.pth"))
+                              "auto: last.pth -> latest epoch_*.pth -> epoch_150.pth"))
     parser.add_argument('--resume_epoch', type=int, default=None,
                         help=("LEGACY weight-only ckpt용: "
                               "resume 파일에 epoch 정보가 없을 때 '마지막 완료 epoch'을 직접 지정. "
@@ -261,7 +194,7 @@ def resolve_resume_path(log_dir: Path, resume_arg: str) -> Optional[Path]:
 
     key_l = key.lower()
     if key_l == 'best':
-        p = log_dir / 'best_model.pth'
+        p = log_dir / 'epoch_150.pth'
         return p if p.is_file() else None
 
     if key_l == 'last':
@@ -277,7 +210,7 @@ def resolve_resume_path(log_dir: Path, resume_arg: str) -> Optional[Path]:
         p = _find_latest_epoch_ckpt(log_dir)
         if p is not None:
             return p
-        p = log_dir / 'best_model.pth'
+        p = log_dir / 'epoch_150.pth'
         return p if p.is_file() else None
 
     # treat as explicit path
@@ -516,7 +449,7 @@ def wavelet_detail_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tenso
 
 
 # ------------------------------------------------------------------
-# 8.5) ✅ Validation PNG 저장 유틸
+# 8.5) Validation PNG 저장 유틸
 # ------------------------------------------------------------------
 def _robust_vmin_vmax(arr: np.ndarray, lo=1.0, hi=99.0):
     """시각화용 robust min/max (percentile)"""
@@ -655,14 +588,14 @@ def train_one_angle(args, device, angle: int):
     log_dir = Path(args.log_root) / f'{angle}angle'
     ensure_dir(log_dir)
 
-    # ✅ 시각화용 validation 샘플 index 고정(매 epoch 동일 샘플로 비교)
+    # 시각화용 validation 샘플 index 고정(매 epoch 동일 샘플로 비교)
     n_viz = int(min(args.viz_n, len(ds_va)))
     rng = np.random.RandomState(args.viz_seed)
     viz_indices = rng.choice(len(ds_va), size=n_viz, replace=False)
     viz_indices = np.sort(viz_indices)
 
     # -------------------------
-    # ✅ RESUME: checkpoint 로드
+    # RESUME: checkpoint 로드
     # -------------------------
     resume_path = resolve_resume_path(log_dir, args.resume)
     resume_is_full = False
@@ -677,7 +610,7 @@ def train_one_angle(args, device, angle: int):
         resume_ckpt_obj = torch.load(resume_path, map_location='cpu')
 
         if isinstance(resume_ckpt_obj, dict) and ('model' in resume_ckpt_obj):
-            # ✅ full checkpoint
+            # full checkpoint
             resume_is_full = True
             resume_last_completed_epoch = int(resume_ckpt_obj.get('epoch', 0))
             best_psnr = float(resume_ckpt_obj.get('best_psnr', -1.0))
@@ -694,7 +627,7 @@ def train_one_angle(args, device, angle: int):
                   f'best_psnr={best_psnr:.2f}')
 
         else:
-            # ✅ legacy: weight-only state_dict
+            # legacy: weight-only state_dict
             resume_is_full = False
             resume_model_state_dict = resume_ckpt_obj
             strict = bool(args.resume_strict)
@@ -712,7 +645,7 @@ def train_one_angle(args, device, angle: int):
                 resume_last_completed_epoch = int(inferred) if inferred is not None else 0
 
             # legacy는 best_psnr 정보가 없으므로, 기존 best_model.pth가 있으면 그 PSNR로 초기화(덮어쓰기 방지)
-            best_path = log_dir / 'best_model.pth'
+            best_path = log_dir / 'epoch_150.pth'
             if best_path.is_file():
                 try:
                     best_obj = torch.load(best_path, map_location='cpu')
@@ -725,7 +658,7 @@ def train_one_angle(args, device, angle: int):
                         best_psnr = validate_psnr(net, va_loader, device)
                         net.load_state_dict(resume_model_state_dict, strict=strict)
                 except Exception as e:
-                    print(f'[RESUME][WARN] Failed to read best_model.pth to init best_psnr: {e}')
+                    print(f'[RESUME][WARN] Failed to read epoch_150.pth to init best_psnr: {e}')
                     best_psnr = -1.0
 
             # best_psnr가 여전히 음수면(=best 파일 없음) 현재 모델 PSNR로 세팅
@@ -884,24 +817,24 @@ def train_one_angle(args, device, angle: int):
             'args': vars(args),
         }
 
-        # ✅ best model 저장 (PSNR 갱신 시마다)
+        # best model 저장 (PSNR 갱신 시마다)
         if psnr > best_psnr:
             best_psnr = psnr
             train_state['best_psnr'] = float(best_psnr)
-            atomic_torch_save(train_state, log_dir / 'best_model.pth')
+            atomic_torch_save(train_state, log_dir / 'epoch_150.pth')
             print(f'    [+] New best model saved ({best_psnr:.2f} dB)')
 
-        # ✅ last checkpoint: 매 epoch 끝에 저장(덮어쓰기)
+        # last checkpoint: 매 epoch 끝에 저장(덮어쓰기)
         train_state['best_psnr'] = float(best_psnr)
         atomic_torch_save(train_state, log_dir / 'last.pth')
 
-        # ✅ 매 save_every epoch마다 모델 저장 (+ 마지막 epoch)
+        # 매 save_every epoch마다 모델 저장 (+ 마지막 epoch)
         if (epoch_num % args.save_every == 0) or (epoch_num == args.epochs):
             ckpt_path = log_dir / f'epoch_{epoch_num:03d}.pth'
             atomic_torch_save(train_state, ckpt_path)
             print(f'    [CKPT] Saved checkpoint: {ckpt_path}')
 
-        # ✅ 매 viz_every epoch마다 PNG 저장 (+ 마지막 epoch에도 저장)
+        # 매 viz_every epoch마다 PNG 저장 (+ 마지막 epoch에도 저장)
         if (epoch_num % args.viz_every == 0) or (epoch_num == args.epochs):
             save_val_comparison_png(
                 net=net,
