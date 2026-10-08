@@ -1,0 +1,64 @@
+# Python caches and local build artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+*.egg-info/
+/build/
+/dist/
+
+# Virtual environments and local environment configuration
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# Editor and operating-system files
+.DS_Store
+._*
+Thumbs.db
+.idea/
+.vscode/
+.ipynb_checkpoints/
+
+# Local datasets, caches, pretrained weights, and experiment output
+/data/
+/datasets/
+/lodopab/
+/assets/
+/research-assets/
+/cache/
+/checkpoints/
+/weights/
+/vit_checkpoint/
+/logs/
+/runs/
+/outputs/
+/results/
+/profiles/
+/test_compare_out*/
+/dc_out/
+/lpd_out/
+
+# Large array, checkpoint, and model files at any location
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.safetensors
+*.pkl
+*.pickle
+*.log
+*.bundle
+
+# Small reproducibility records can be tracked when released.
+# Do not globally ignore CSV/JSON/PDF/PNG files, configs/, or derived_results/.

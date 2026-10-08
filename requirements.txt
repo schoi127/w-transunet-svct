@@ -1,0 +1,23 @@
+# Shared environment for cached evaluation and stored-result statistics.
+# Reference versions come from the retained study environment.
+# Use Python 3.9-3.11; README examples use Python 3.11.
+# These direct-dependency pins are not a complete environment lock.
+
+numpy==1.26.4
+scipy==1.13.1
+matplotlib==3.9.4
+pandas==2.3.1
+tqdm==4.67.1
+ml-collections==0.1.1
+torch==2.5.1
+torchvision==0.20.1
+
+# Additional CT dependencies are installed separately on the CT host.
+# See README.md for installation and the required DIVal source checkout.
+# odl==0.8.2
+# astra-toolbox==2.3.1
+# h5py==3.14.0
+# scikit-image==0.24.0
+# tensorboard==2.20.0
+# tensorboardX==2.6.4
+# DIVal revision: dd86f03733593dd6e226263aa1d3abec961c7881
